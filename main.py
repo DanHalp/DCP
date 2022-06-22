@@ -124,7 +124,7 @@ def test_one_epoch(args, net, test_loader):
         transformed_src = transform_point_cloud(src, rotation_ab_pred, translation_ab_pred)
 
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
-
+        #asdasd
         ###########################
         # identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
         # loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
