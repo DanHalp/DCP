@@ -6,6 +6,7 @@ from __future__ import print_function
 import os
 import gc
 import argparse
+import shutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +35,28 @@ class IOStream:
     def close(self):
         self.f.close()
 
+
+def write_pcd_to_obj(file_path, file_content):
+    with open(file_path, "w") as output:
+        for v in file_content:
+            x, y, z = v
+            output.write(f"v {x} {y} {z}\n")
+    output.close()
+
+
+def export_pcd_as_obj(src, target, pred, path, sample_n=""):
+    output_file_path = os.path.join(path, f"{sample_n}_orig.obj")
+    write_pcd_to_obj(output_file_path, src)
+    print(f"Saved original point cloud to {output_file_path}")
+    
+    output_file_path = os.path.join(path, f"{sample_n}_pred.obj")
+    write_pcd_to_obj(output_file_path, pred)
+    print(f"Saved predicted point cloud to {output_file_path}")
+    
+    output_file_path = os.path.join(path, f"{sample_n}_gt.obj")
+    write_pcd_to_obj(output_file_path, target)
+    print(f"Saved ground_truth point cloud to {output_file_path}")
+    
 
 def _init_(args):
     if not os.path.exists('checkpoints'):
@@ -70,7 +93,7 @@ def test_one_epoch(args, net, test_loader):
     eulers_ab = []
     eulers_ba = []
 
-    for src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba in tqdm(test_loader):
+    for i, (src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba) in enumerate(tqdm(test_loader)):
         src = src.cuda()
         target = target.cuda()
         rotation_ab = rotation_ab.cuda()
@@ -95,33 +118,59 @@ def test_one_epoch(args, net, test_loader):
         translations_ba_pred.append(translation_ba_pred.detach().cpu().numpy())
         eulers_ba.append(euler_ba.numpy())
 
+        indices = np.random.choice(np.arange(src.shape[2]), 400)
+        src = src[:,:,indices]
+        
         transformed_src = transform_point_cloud(src, rotation_ab_pred, translation_ab_pred)
 
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
 
         ###########################
-        identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
-        loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
-               + F.mse_loss(translation_ab_pred, translation_ab)
-        if args.cycle:
-            rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
-            translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
-                                                        translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
-                                           + translation_ba_pred) ** 2, dim=[0, 1])
-            cycle_loss = rotation_loss + translation_loss
+        # identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
+        # loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
+        #        + F.mse_loss(translation_ab_pred, translation_ab)
+        # if args.cycle:
+        #     rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
+        #     translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
+        #                                                 translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
+        #                                    + translation_ba_pred) ** 2, dim=[0, 1])
+        #     cycle_loss = rotation_loss + translation_loss
 
-            loss = loss + cycle_loss * 0.1
+        #     loss = loss + cycle_loss * 0.1
 
-        total_loss += loss.item() * batch_size
+        # total_loss += loss.item() * batch_size
 
-        if args.cycle:
-            total_cycle_loss = total_cycle_loss + cycle_loss.item() * 0.1 * batch_size
+        # if args.cycle:
+        #     total_cycle_loss = total_cycle_loss + cycle_loss.item() * 0.1 * batch_size
 
-        mse_ab += torch.mean((transformed_src - target) ** 2, dim=[0, 1, 2]).item() * batch_size
-        mae_ab += torch.mean(torch.abs(transformed_src - target), dim=[0, 1, 2]).item() * batch_size
+        # mse_ab += torch.mean((transformed_src - target) ** 2, dim=[0, 1, 2]).item() * batch_size
+        # mae_ab += torch.mean(torch.abs(transformed_src - target), dim=[0, 1, 2]).item() * batch_size
 
-        mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
-        mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
+        # mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
+        # mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
+        
+        # Export pcds
+        batch_size = src.shape[0]
+        for j in range(batch_size):
+            
+            sample_n = i * batch_size + j
+            output_folder = os.path.join("./outputs", "point_clouds", str(sample_n))
+            if os.path.exists(output_folder):
+                shutil.rmtree(output_folder)
+            os.makedirs(
+                output_folder,
+                exist_ok=True,
+            )
+            export_pcd_as_obj(src=src[j].squeeze().detach().cpu().numpy().T,
+                              target=target[j].squeeze().detach().cpu().numpy().T,
+                              pred=transformed_src[j].squeeze().detach().cpu().numpy().T,
+                              path=output_folder,
+                              sample_n=sample_n)
+                        
+            
+           
+            
+        
 
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
@@ -135,6 +184,10 @@ def test_one_epoch(args, net, test_loader):
 
     eulers_ab = np.concatenate(eulers_ab, axis=0)
     eulers_ba = np.concatenate(eulers_ba, axis=0)
+    
+    
+    
+    
 
     return total_loss * 1.0 / num_examples, total_cycle_loss / num_examples, \
            mse_ab * 1.0 / num_examples, mae_ab * 1.0 / num_examples, \
