@@ -6,6 +6,7 @@ from __future__ import print_function
 import os
 import gc
 import argparse
+import shutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +35,28 @@ class IOStream:
     def close(self):
         self.f.close()
 
+
+def write_pcd_to_obj(file_path, file_content):
+    with open(file_path, "w") as output:
+        for v in file_content:
+            x, y, z = v
+            output.write(f"v {x} {y} {z}\n")
+    output.close()
+
+
+def export_pcd_as_obj(src, target, pred, path, sample_n=""):
+    output_file_path = os.path.join(path, f"{sample_n}_orig.obj")
+    write_pcd_to_obj(output_file_path, src)
+    print(f"Saved original point cloud to {output_file_path}")
+    
+    output_file_path = os.path.join(path, f"{sample_n}_pred.obj")
+    write_pcd_to_obj(output_file_path, pred)
+    print(f"Saved predicted point cloud to {output_file_path}")
+    
+    output_file_path = os.path.join(path, f"{sample_n}_gt.obj")
+    write_pcd_to_obj(output_file_path, target)
+    print(f"Saved ground_truth point cloud to {output_file_path}")
+    
 
 def _init_(args):
     if not os.path.exists('checkpoints'):
@@ -70,7 +93,7 @@ def test_one_epoch(args, net, test_loader):
     eulers_ab = []
     eulers_ba = []
 
-    for src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba in tqdm(test_loader):
+    for i, (src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba) in enumerate(tqdm(test_loader)):
         src = src.cuda()
         target = target.cuda()
         rotation_ab = rotation_ab.cuda()
@@ -122,6 +145,29 @@ def test_one_epoch(args, net, test_loader):
 
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
+        
+        # Export pcds
+        batch_size = src.shape[0]
+        for j in range(batch_size):
+            
+            sample_n = i * batch_size + j
+            output_folder = os.path.join("./outputs", "point_clouds", str(sample_n))
+            if os.path.exists(output_folder):
+                shutil.rmtree(output_folder)
+            os.makedirs(
+                output_folder,
+                exist_ok=True,
+            )
+            export_pcd_as_obj(src=src[j].squeeze().detach().cpu().numpy().T,
+                              target=target[j].squeeze().detach().cpu().numpy().T,
+                              pred=transformed_src[j].squeeze().detach().cpu().numpy().T,
+                              path=output_folder,
+                              sample_n=sample_n)
+                        
+            
+           
+            
+        
 
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
@@ -135,6 +181,10 @@ def test_one_epoch(args, net, test_loader):
 
     eulers_ab = np.concatenate(eulers_ab, axis=0)
     eulers_ba = np.concatenate(eulers_ba, axis=0)
+    
+    
+    
+    
 
     return total_loss * 1.0 / num_examples, total_cycle_loss / num_examples, \
            mse_ab * 1.0 / num_examples, mae_ab * 1.0 / num_examples, \
