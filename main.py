@@ -118,33 +118,36 @@ def test_one_epoch(args, net, test_loader):
         translations_ba_pred.append(translation_ba_pred.detach().cpu().numpy())
         eulers_ba.append(euler_ba.numpy())
 
+        indices = np.random.choice(np.arange(src.shape[2]), 400)
+        src = src[:,:,indices]
+        
         transformed_src = transform_point_cloud(src, rotation_ab_pred, translation_ab_pred)
 
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
 
         ###########################
-        identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
-        loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
-               + F.mse_loss(translation_ab_pred, translation_ab)
-        if args.cycle:
-            rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
-            translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
-                                                        translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
-                                           + translation_ba_pred) ** 2, dim=[0, 1])
-            cycle_loss = rotation_loss + translation_loss
+        # identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
+        # loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
+        #        + F.mse_loss(translation_ab_pred, translation_ab)
+        # if args.cycle:
+        #     rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
+        #     translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
+        #                                                 translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
+        #                                    + translation_ba_pred) ** 2, dim=[0, 1])
+        #     cycle_loss = rotation_loss + translation_loss
 
-            loss = loss + cycle_loss * 0.1
+        #     loss = loss + cycle_loss * 0.1
 
-        total_loss += loss.item() * batch_size
+        # total_loss += loss.item() * batch_size
 
-        if args.cycle:
-            total_cycle_loss = total_cycle_loss + cycle_loss.item() * 0.1 * batch_size
+        # if args.cycle:
+        #     total_cycle_loss = total_cycle_loss + cycle_loss.item() * 0.1 * batch_size
 
-        mse_ab += torch.mean((transformed_src - target) ** 2, dim=[0, 1, 2]).item() * batch_size
-        mae_ab += torch.mean(torch.abs(transformed_src - target), dim=[0, 1, 2]).item() * batch_size
+        # mse_ab += torch.mean((transformed_src - target) ** 2, dim=[0, 1, 2]).item() * batch_size
+        # mae_ab += torch.mean(torch.abs(transformed_src - target), dim=[0, 1, 2]).item() * batch_size
 
-        mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
-        mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
+        # mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
+        # mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
         
         # Export pcds
         batch_size = src.shape[0]

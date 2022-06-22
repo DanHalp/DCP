@@ -62,7 +62,7 @@ class ModelNet40(Dataset):
     def __init__(self, num_points, partition='train', gaussian_noise=False, unseen=False, factor=4):
         self.data, self.label = load_data(partition)
         
-        self.data, self.label = self.data[:4], self.label[:4] # TODO: Remove!!!!!!!!
+        self.data, self.label = self.data[:16], self.label[:16] # TODO: Remove!!!!!!!!
         self.num_points = num_points
         self.partition = partition
         self.gaussian_noise = gaussian_noise
