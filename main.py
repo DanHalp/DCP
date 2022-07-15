@@ -185,8 +185,6 @@ def test_one_epoch(args, net, test_loader):
     eulers_ba = np.concatenate(eulers_ba, axis=0)
     
     
-    
-    
 
     return total_loss * 1.0 / num_examples, total_cycle_loss / num_examples, \
            mse_ab * 1.0 / num_examples, mae_ab * 1.0 / num_examples, \
@@ -218,8 +216,8 @@ def train_one_epoch(args, net, train_loader, opt):
 
     eulers_ab = []
     eulers_ba = []
-
     for src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba in tqdm(train_loader):
+
         src = src.cuda()
         target = target.cuda()
         rotation_ab = rotation_ab.cuda()
@@ -233,6 +231,7 @@ def train_one_epoch(args, net, train_loader, opt):
         rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred = net(src, target)
 
         ## save rotation and translation
+        print(rotation_ab)
         rotations_ab.append(rotation_ab.detach().cpu().numpy())
         translations_ab.append(translation_ab.detach().cpu().numpy())
         rotations_ab_pred.append(rotation_ab_pred.detach().cpu().numpy())
@@ -274,6 +273,7 @@ def train_one_epoch(args, net, train_loader, opt):
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
 
+    print(rotations_ab)
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
     rotations_ab_pred = np.concatenate(rotations_ab_pred, axis=0)
@@ -646,7 +646,8 @@ def main():
             batch_size=args.test_batch_size, shuffle=False, drop_last=False)
     else:
         raise Exception("not implemented")
-
+    
+    # print(len(test_loader));exit()
     if args.model == 'dcp':
         net = DCP(args).cuda()
         if args.eval:

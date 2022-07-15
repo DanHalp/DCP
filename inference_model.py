@@ -3,8 +3,10 @@
 
 import os
 import sys
-
+from SpareNet.configs.base_config import cfg as sparenet_cfg
 from easydict import EasyDict as edict
+from pathlib import Path
+import torch
 
 
 
@@ -15,6 +17,16 @@ class DCP_MODEL():
         
     
     def make_model(self, args=edict()):
+        
+        test_dataset_loader = DATASET_LOADER_MAPPING[cfg.DATASET.test_dataset](cfg)
+        val_data_loader = torch.utils.data.DataLoader(
+            dataset=test_dataset_loader.get_dataset(DatasetSubset.TEST),
+            batch_size=1,
+            num_workers=cfg.CONST.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            shuffle=False,
+        )
        
 
     @property

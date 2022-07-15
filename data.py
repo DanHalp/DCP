@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
+from pathlib import Path
 
 
 # Part of the code is referred from: https://github.com/charlesq34/pointnet
@@ -27,9 +28,10 @@ def download():
 
 
 def load_data(partition):
-    download()
+    # download()
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
+    DATA_DIR = Path("/home/danha/PCD-Reconstruction-and-Registration/data")
+    # DATA_DIR = os.path.join(BASE_DIR, 'data')
     all_data = []
     all_label = []
     for h5_name in glob.glob(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048', 'ply_data_%s*.h5' % partition)):
