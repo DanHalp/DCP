@@ -12,13 +12,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
-from data import ModelNet40
-from model import DCP
-from util import transform_point_cloud, npmat2euler
+from .data import ModelNet40
+from .model import DCP
+from .util import transform_point_cloud, npmat2euler
 import numpy as np
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
+from Configs.pr_config import DATASETS
 
 
 # Part of the code is referred from: https://github.com/floodsung/LearningToCompare_FSL
@@ -61,13 +62,13 @@ def export_pcd_as_obj(src, target, pred, path, sample_n=""):
 def _init_(args):
     if not os.path.exists('checkpoints'):
         os.makedirs('checkpoints')
-    if not os.path.exists('checkpoints/' + args.exp_name):
-        os.makedirs('checkpoints/' + args.exp_name)
-    if not os.path.exists('checkpoints/' + args.exp_name + '/' + 'models'):
-        os.makedirs('checkpoints/' + args.exp_name + '/' + 'models')
-    os.system('cp main.py checkpoints' + '/' + args.exp_name + '/' + 'main.py.backup')
-    os.system('cp model.py checkpoints' + '/' + args.exp_name + '/' + 'model.py.backup')
-    os.system('cp data.py checkpoints' + '/' + args.exp_name + '/' + 'data.py.backup')
+    if not os.path.exists('checkpoints/' + args.TRANSFORM.exp_name):
+        os.makedirs('checkpoints/' + args.TRANSFORM.exp_name)
+    if not os.path.exists('checkpoints/' + args.TRANSFORM.exp_name + '/' + 'models'):
+        os.makedirs('checkpoints/' + args.TRANSFORM.exp_name + '/' + 'models')
+    os.system('cp main.py checkpoints' + '/' + args.TRANSFORM.exp_name + '/' + 'main.py.backup')
+    os.system('cp model.py checkpoints' + '/' + args.TRANSFORM.exp_name + '/' + 'model.py.backup')
+    os.system('cp data.py checkpoints' + '/' + args.TRANSFORM.exp_name + '/' + 'data.py.backup')
 
 
 def test_one_epoch(args, net, test_loader):
@@ -92,7 +93,6 @@ def test_one_epoch(args, net, test_loader):
 
     eulers_ab = []
     eulers_ba = []
-
     for i, (src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba) in enumerate(tqdm(test_loader)):
         src = src.cuda()
         target = target.cuda()
@@ -104,6 +104,7 @@ def test_one_epoch(args, net, test_loader):
         batch_size = src.size(0)
         num_examples += batch_size
         rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred = net(src, target)
+        
 
         ## save rotation and translation
         rotations_ab.append(rotation_ab.detach().cpu().numpy())
@@ -118,44 +119,43 @@ def test_one_epoch(args, net, test_loader):
         translations_ba_pred.append(translation_ba_pred.detach().cpu().numpy())
         eulers_ba.append(euler_ba.numpy())
 
-        indices = np.random.choice(np.arange(src.shape[2]), 400)
-        src = src[:,:,indices]
+        # indices = np.random.choice(np.arange(src.shape[2]), 400)
+        # src = src[:,:,indices]
         
         transformed_src = transform_point_cloud(src, rotation_ab_pred, translation_ab_pred)
 
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
         ###########################
-        # identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
-        # loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
-        #        + F.mse_loss(translation_ab_pred, translation_ab)
-        # if args.cycle:
-        #     rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
-        #     translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
-        #                                                 translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
-        #                                    + translation_ba_pred) ** 2, dim=[0, 1])
-        #     cycle_loss = rotation_loss + translation_loss
+        identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
+        loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
+               + F.mse_loss(translation_ab_pred, translation_ab)
+        if args.TRANSFORM.cycle:
+            rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
+            translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
+                                                        translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
+                                           + translation_ba_pred) ** 2, dim=[0, 1])
+            cycle_loss = rotation_loss + translation_loss
 
-        #     loss = loss + cycle_loss * 0.1
+            loss = loss + cycle_loss * 0.1
 
-        # total_loss += loss.item() * batch_size
+        total_loss += loss.item() * batch_size
 
-        # if args.cycle:
-        #     total_cycle_loss = total_cycle_loss + cycle_loss.item() * 0.1 * batch_size
+        if args.TRANSFORM.cycle:
+            total_cycle_loss = total_cycle_loss + cycle_loss.item() * 0.1 * batch_size
+        mse_ab += torch.mean((transformed_src - target) ** 2, dim=[0, 1, 2]).item() * batch_size
+        mae_ab += torch.mean(torch.abs(transformed_src - target), dim=[0, 1, 2]).item() * batch_size
 
-        # mse_ab += torch.mean((transformed_src - target) ** 2, dim=[0, 1, 2]).item() * batch_size
-        # mae_ab += torch.mean(torch.abs(transformed_src - target), dim=[0, 1, 2]).item() * batch_size
-
-        # mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
-        # mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
+        mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
+        mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
         
         # Export pcds
         batch_size = src.shape[0]
         for j in range(batch_size):
             
             sample_n = i * batch_size + j
-            output_folder = os.path.join("./outputs", "point_clouds", str(sample_n))
-            if os.path.exists(output_folder):
-                shutil.rmtree(output_folder)
+            output_folder = os.path.join("./Outputs", "point_clouds", str(sample_n))
+            # if os.path.exists(output_folder):
+            #     shutil.rmtree(output_folder)
             os.makedirs(
                 output_folder,
                 exist_ok=True,
@@ -231,7 +231,6 @@ def train_one_epoch(args, net, train_loader, opt):
         rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred = net(src, target)
 
         ## save rotation and translation
-        print(rotation_ab)
         rotations_ab.append(rotation_ab.detach().cpu().numpy())
         translations_ab.append(translation_ab.detach().cpu().numpy())
         rotations_ab_pred.append(rotation_ab_pred.detach().cpu().numpy())
@@ -273,7 +272,6 @@ def train_one_epoch(args, net, train_loader, opt):
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
 
-    print(rotations_ab)
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
     rotations_ab_pred = np.concatenate(rotations_ab_pred, axis=0)
@@ -335,7 +333,7 @@ def test(args, net, test_loader, boardio, textio):
 
 
 def train(args, net, train_loader, test_loader, boardio, textio):
-    if args.use_sgd:
+    if args.TRANSFORM.use_sgd:
         print("Use SGD")
         opt = optim.SGD(net.parameters(), lr=args.lr * 100, momentum=args.momentum, weight_decay=1e-4)
     else:
@@ -344,29 +342,6 @@ def train(args, net, train_loader, test_loader, boardio, textio):
     scheduler = MultiStepLR(opt, milestones=[75, 150, 200], gamma=0.1)
 
 
-    best_test_loss = np.inf
-    best_test_cycle_loss = np.inf
-    best_test_mse_ab = np.inf
-    best_test_rmse_ab = np.inf
-    best_test_mae_ab = np.inf
-
-    best_test_r_mse_ab = np.inf
-    best_test_r_rmse_ab = np.inf
-    best_test_r_mae_ab = np.inf
-    best_test_t_mse_ab = np.inf
-    best_test_t_rmse_ab = np.inf
-    best_test_t_mae_ab = np.inf
-
-    best_test_mse_ba = np.inf
-    best_test_rmse_ba = np.inf
-    best_test_mae_ba = np.inf
-
-    best_test_r_mse_ba = np.inf
-    best_test_r_rmse_ba = np.inf
-    best_test_r_mae_ba = np.inf
-    best_test_t_mse_ba = np.inf
-    best_test_t_rmse_ba = np.inf
-    best_test_t_mae_ba = np.inf
 
     for epoch in range(args.epochs):
         scheduler.step()
@@ -564,7 +539,7 @@ def train(args, net, train_loader, test_loader, boardio, textio):
         gc.collect()
 
 
-def main():
+def main_func(args):
     parser = argparse.ArgumentParser(description='Point Cloud Registration')
     parser.add_argument('--exp_name', type=str, default='exp', metavar='N',
                         help='Name of the experiment')
@@ -623,39 +598,39 @@ def main():
     parser.add_argument('--model_path', type=str, default='', metavar='N',
                         help='Pretrained model path')
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
     torch.backends.cudnn.deterministic = True
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    np.random.seed(args.seed)
+    torch.manual_seed(args.TRANSFORM.seed)
+    torch.cuda.manual_seed_all(args.TRANSFORM.seed)
+    np.random.seed(args.TRANSFORM.seed)
 
-    boardio = SummaryWriter(log_dir='checkpoints/' + args.exp_name)
+    boardio = SummaryWriter(log_dir='checkpoints/' + args.TRANSFORM.exp_name)
     _init_(args)
 
-    textio = IOStream('checkpoints/' + args.exp_name + '/run.log')
+    textio = IOStream('checkpoints/' + args.TRANSFORM.exp_name + '/run.log')
     textio.cprint(str(args))
-
-    if args.dataset == 'modelnet40':
+    if args.TRANSFORM.dataset == DATASETS.MODELNET:
         train_loader = DataLoader(
-            ModelNet40(num_points=args.num_points, partition='train', gaussian_noise=args.gaussian_noise,
-                       unseen=args.unseen, factor=args.factor),
-            batch_size=args.batch_size, shuffle=True, drop_last=True)
+            ModelNet40(num_points=args.TRANSFORM.num_points, partition='train', gaussian_noise=args.TRANSFORM.gaussian_noise,
+                       unseen=args.TRANSFORM.unseen, factor=args.TRANSFORM.factor),
+            batch_size=args.TRANSFORM.batch_size, shuffle=True, drop_last=True)
         test_loader = DataLoader(
-            ModelNet40(num_points=args.num_points, partition='test', gaussian_noise=args.gaussian_noise,
-                       unseen=args.unseen, factor=args.factor),
-            batch_size=args.test_batch_size, shuffle=False, drop_last=False)
+            ModelNet40(num_points=args.TRANSFORM.num_points, partition='test', gaussian_noise=args.TRANSFORM.gaussian_noise,
+                       unseen=args.TRANSFORM.unseen, factor=args.TRANSFORM.factor),
+            batch_size=args.TRANSFORM.test_batch_size, shuffle=False, drop_last=False)
     else:
         raise Exception("not implemented")
     
     # print(len(test_loader));exit()
-    if args.model == 'dcp':
+    if args.TRANSFORM.model == 'dcp':
         net = DCP(args).cuda()
-        if args.eval:
-            if args.model_path is '':
-                model_path = 'checkpoints' + '/' + args.exp_name + '/models/model.best.t7'
-            else:
-                model_path = args.model_path
+        if args.TRANSFORM.eval:
+            if args.TRANSFORM.model_path is '':
+                model_path = 'checkpoints' + '/' + args.TRANSFORM.exp_name + '/models/model.best.t7'
                 print(model_path)
+
+            else:
+                model_path = args.TRANSFORM.model_path
             if not os.path.exists(model_path):
                 print("can't find pretrained model")
                 return
@@ -665,7 +640,7 @@ def main():
             print("Let's use", torch.cuda.device_count(), "GPUs!")
     else:
         raise Exception('Not implemented')
-    if args.eval:
+    if args.TRANSFORM.eval:
         test(args, net, test_loader, boardio, textio)
     else:
         train(args, net, train_loader, test_loader, boardio, textio)
@@ -676,4 +651,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main_func()

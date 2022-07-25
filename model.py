@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from util import quat2mat
+# from .util import quat2mat
 
 
 # Part of the code is referred from: http://nlp.seas.harvard.edu/2018/04/03/attention.html#positional-encoding
@@ -312,7 +312,7 @@ class DGCNN(nn.Module):
 class MLPHead(nn.Module):
     def __init__(self, args):
         super(MLPHead, self).__init__()
-        emb_dims = args.emb_dims
+        emb_dims = args.TRANSFORM.emb_dims
         self.emb_dims = emb_dims
         self.nn = nn.Sequential(nn.Linear(emb_dims * 2, emb_dims // 2),
                                 nn.BatchNorm1d(emb_dims // 2),
@@ -348,11 +348,11 @@ class Identity(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, args):
         super(Transformer, self).__init__()
-        self.emb_dims = args.emb_dims
-        self.N = args.n_blocks
-        self.dropout = args.dropout
-        self.ff_dims = args.ff_dims
-        self.n_heads = args.n_heads
+        self.emb_dims = args.TRANSFORM.emb_dims
+        self.N = args.TRANSFORM.n_blocks
+        self.dropout = args.TRANSFORM.dropout
+        self.ff_dims = args.TRANSFORM.ff_dims
+        self.n_heads = args.TRANSFORM.n_heads
         c = copy.deepcopy
         attn = MultiHeadedAttention(self.n_heads, self.emb_dims)
         ff = PositionwiseFeedForward(self.emb_dims, self.ff_dims, self.dropout)
@@ -375,7 +375,7 @@ class Transformer(nn.Module):
 class SVDHead(nn.Module):
     def __init__(self, args):
         super(SVDHead, self).__init__()
-        self.emb_dims = args.emb_dims
+        self.emb_dims = args.TRANSFORM.emb_dims
         self.reflect = nn.Parameter(torch.eye(3), requires_grad=False)
         self.reflect[2, 2] = -1
 
@@ -428,25 +428,25 @@ class SVDHead(nn.Module):
 class DCP(nn.Module):
     def __init__(self, args):
         super(DCP, self).__init__()
-        self.emb_dims = args.emb_dims
-        self.cycle = args.cycle
-        if args.emb_nn == 'pointnet':
+        self.emb_dims = args.TRANSFORM.emb_dims
+        self.cycle = args.TRANSFORM.cycle
+        if args.TRANSFORM.emb_nn == 'pointnet':
             self.emb_nn = PointNet(emb_dims=self.emb_dims)
-        elif args.emb_nn == 'dgcnn':
+        elif args.TRANSFORM.emb_nn == 'dgcnn':
             self.emb_nn = DGCNN(emb_dims=self.emb_dims)
         else:
             raise Exception('Not implemented')
 
-        if args.pointer == 'identity':
+        if args.TRANSFORM.pointer == 'identity':
             self.pointer = Identity()
-        elif args.pointer == 'transformer':
+        elif args.TRANSFORM.pointer == 'transformer':
             self.pointer = Transformer(args=args)
         else:
             raise Exception("Not implemented")
 
-        if args.head == 'mlp':
+        if args.TRANSFORM.head == 'mlp':
             self.head = MLPHead(args=args)
-        elif args.head == 'svd':
+        elif args.TRANSFORM.head == 'svd':
             self.head = SVDHead(args=args)
         else:
             raise Exception('Not implemented')

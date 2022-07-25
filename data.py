@@ -10,6 +10,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
 from pathlib import Path
+from Configs.pr_config import CFG
 
 
 # Part of the code is referred from: https://github.com/charlesq34/pointnet
@@ -43,6 +44,10 @@ def load_data(partition):
         all_label.append(label)
     all_data = np.concatenate(all_data, axis=0)
     all_label = np.concatenate(all_label, axis=0)
+    
+    if partition == "test":
+        indi = np.random.permutation(np.arange(len(all_data)))[:CFG.TRANSFORM.test_batch_size]
+        all_data, all_label = all_data[indi], all_label[indi]
     return all_data, all_label
 
 
@@ -54,6 +59,7 @@ def translate_pointcloud(pointcloud):
     return translated_pointcloud
 
 
+
 def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.05):
     N, C = pointcloud.shape
     pointcloud += np.clip(sigma * np.random.randn(N, C), -1 * clip, clip)
@@ -63,8 +69,6 @@ def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.05):
 class ModelNet40(Dataset):
     def __init__(self, num_points, partition='train', gaussian_noise=False, unseen=False, factor=4):
         self.data, self.label = load_data(partition)
-        
-        self.data, self.label = self.data[:16], self.label[:16] # TODO: Remove!!!!!!!!
         self.num_points = num_points
         self.partition = partition
         self.gaussian_noise = gaussian_noise
