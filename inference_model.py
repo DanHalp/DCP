@@ -1,8 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from datetime import datetime
 import os
-import sys
 from easydict import EasyDict as edict
 from pathlib import Path
 import torch
@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation
 from DCP.model import DCP
 from DCP.util import transform_point_cloud, npmat2euler
 import torch.nn.functional as F
-from Configs.pr_config import DATASETS
+from Configs.pr_config import *
 from DCP.data import ModelNet40
 import torch
 from tqdm import tqdm
@@ -29,14 +29,6 @@ class DCP_MODEL():
         self.device = args.PROJECT.device
         self._model, self._cfg  = self.make_model(args)
         self.reconstructor = SpareNet(self._cfg)
-        # self.dataloader = torch.utils.data.DataLoader(
-        #     dataset=self.dataset,
-        #     batch_size=1,
-        #     num_workers=2,
-        #     collate_fn=collate_fn,
-        #     pin_memory=True,
-        #     shuffle=False,
-        # )
         
         if partiton=="test":
             self._model.eval()
@@ -177,8 +169,16 @@ class DCP_MODEL():
         if ind < 0:
             ind =  np.random.choice(np.arange(len(self.dataset)))
         if self._cfg.TRANSFORM.dataset == DATASETS.SHAPENET:
-            x = self.dataset[ind][-1][self._cfg.TRANSFORM.pc_type].to(self.device)
-            gt = self.dataset[ind][-1]["gtcloud"].to(self.device)             
+            if self._cfg.RECONSTRUCTION.active:
+                data = {PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]: x, PC_TYPES_LIST[PC_TYPES.GT_CLOUD]: gt}
+                _, _, refine_ptcloud, _ = self.reconstructor.complete(data)
+                print(f"######################## Reconstructed pc {ind}")
+                dis = self.reconstructor.chamf_dis(refine_ptcloud, gt)
+                indi = torch.where(dis[0].squeeze() <= dis[0].mean())[0]
+                x = refine_ptcloud[:, indi].reshape(1, -1, 3)
+            else:
+                x = self.dataset[ind][-1][self._cfg.TRANSFORM.pc_type].to(self.device)
+            gt = self.dataset[ind][-1][PC_TYPES_LIST[PC_TYPES.GT_CLOUD]].to(self.device)             
         else:
             x = torch.from_numpy(self.dataset.data[ind]).to(self.device)
             gt = x
@@ -187,15 +187,8 @@ class DCP_MODEL():
             x = x[None, :]
         if len(gt.size()) < 3:
             gt = gt[None, :]
-            
-    
-        if self._cfg.RECONSTRUCTION.active:
-            data = {"partial_cloud": x, "gtcloud": gt}
-            _, _, refine_ptcloud, _ = self.reconstructor.complete(data)
-            print(f"######################## Reconstructed pc {ind}")
-            dis = self.reconstructor.chamf_dis(refine_ptcloud, gt)
-            indi = torch.where(dis[0].squeeze() <= dis[0].mean())[0]
-            x = refine_ptcloud[:, indi].reshape(1, -1, 3)
+
+
         return x, gt
 
     
@@ -215,7 +208,49 @@ class DCP_MODEL():
     def test(self):
         self.model.test()
     
-    def create_batch(self):
+    def create_log_files(self, cloud_type):
+        
+        pc_path = Path(CFG.TRANSFORM.output) / CFG.TRANSFORM.dataset_name / cloud_type
+        make_dir(pc_path)
+        metrics_path = Path(CFG.TRANSFORM.output) / "Metrics" / cloud_type
+        make_dir(metrics_path)
+        self._cfg.TRANSFORM.output = pc_path
+        self._cfg.TRANSFORM.metrics_path = metrics_path
+        
+        time = datetime.now().strftime('run_%H_%M_%d_%m_%Y')
+        metrics_file = IOStream(self._cfg.TRANSFORM.metrics_path / f"metrics_{self._cfg.TRANSFORM.dataset_name}_{cloud_type}_{time}.csv")
+        metrics_file.write_file("Iteration,ID,Loss,Cycle_Loss,MSE,RMSE,MAE,rot_MSE,rot_RMSE,rot_MAE,trans_MSE,trans_RMSE,trans_MAE")
+        xxx_file = IOStream(self._cfg.TRANSFORM.metrics_path / f"transformation_{self._cfg.TRANSFORM.dataset_name}_{cloud_type}_{time}.csv")
+        xxx_file.write_file("Sample_ID;type;rotation_ab;translation_ab;rotation_ba;translation_ba")
+    
+        return xxx_file, metrics_file
+    
+    def compare_all(self):
+        '''
+        This function compares the partial, reconstructed and the gt rotations, according to the same fixed rotation (Randomly sampled at the begining),
+        for fair comparison
+        '''
+        
+        # Estimate the initial rotation on the ground_truth.
+        self._cfg.RECONSTRUCTION.active = False
+        self._cfg.TRANSFORM.pc_type = PC_TYPES_LIST[PC_TYPES.GT_CLOUD]
+        batch = self.create_batch()
+
+        self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
+        exit()
+        # Calculate the partial point cloud.
+        self._cfg.TRANSFORM.pc_type = PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]
+        src, _, _, _, _, _, _, _ = self.create_batch(rotation_is_known=True)
+        batch[0] = src
+        self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
+        
+        # Evaluate reconstrucion.
+        self._cfg.RECONSTRUCTION.active = True
+        src, _, _, _, _, _, _, _ = self.create_batch(rotation_is_known=True)
+        batch[0] = src
+        self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
+        
+    def create_batch(self, rotation_is_known=False):
         
         if self._cfg.TRANSFORM.dataset == DATASETS.MODELNET:
             size = min(len(self.dataset.data), self._cfg.TRANSFORM.test_batch_size)
@@ -235,13 +270,12 @@ class DCP_MODEL():
         
         
         for i in range(size):
-            output_folder = os.path.join(self._cfg.TRANSFORM.output, str(i))
-            os.makedirs(
-                output_folder,
-                exist_ok=True,
-            )
-            # TODO: Create a batch
+           
             pc, gt = self.sample_pc(i)
+            
+            if rotation_is_known:
+                srcs.append(pc)
+                continue
            
             pc = pc.transpose(2,1)
             src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba = self.create_random_trans(pc.cpu())
@@ -252,38 +286,44 @@ class DCP_MODEL():
             gt = gt.transpose(2,1)
             gt = transform_point_cloud(gt, rotation_ab, translation_ab)
             
-            self.write_pcd_to_obj(os.path.join(output_folder, "src.obj"), pc.squeeze().detach().cpu().numpy().T, c=(1, 0, 0))
-            self.write_pcd_to_obj(os.path.join(output_folder, "target.obj"), gt.squeeze().detach().cpu().numpy().T, c=(0, 1, 1))
-            
-            srcs.append(src.detach().cpu().numpy())
-            targets.append(target.detach().cpu().numpy())
+            srcs.append(src)
+            targets.append(target)
             
 
             ## save rotation and translation
-            rotations_ab.append(rotation_ab.detach().cpu().numpy())
-            translations_ab.append(translation_ab.detach().cpu().numpy())
+            rotations_ab.append(rotation_ab)
+            translations_ab.append(translation_ab)
             eulers_ab.append(euler_ab.detach().cpu().numpy())
             ##
-            rotations_ba.append(rotation_ba.detach().cpu().numpy())
-            translations_ba.append(translation_ba.detach().cpu().numpy())
+            rotations_ba.append(rotation_ba)
+            translations_ba.append(translation_ba)
             eulers_ba.append(euler_ba.detach().cpu().numpy())
+        
+        if rotation_is_known:
+            srcs = torch.cat(srcs, axis=0)
+            return srcs, targets, rotations_ab, translations_ab, eulers_ab, rotations_ba, translations_ba, eulers_ba
+        
+        srcs = torch.cat(srcs, axis=0).to(self.device)
+        targets = torch.cat(targets, axis=0).to(self.device)
 
-        srcs = np.concatenate(srcs, axis=0)
-        targets = np.concatenate(targets, axis=0)
-
-        rotations_ab = np.concatenate(rotations_ab, axis=0)
-        translations_ab = np.concatenate(translations_ab, axis=0)
+        rotations_ab = torch.cat(rotations_ab, axis=0).to(self.device)
+        translations_ab = torch.cat(translations_ab, axis=0).to(self.device)
         eulers_ab = np.concatenate(eulers_ab, axis=0)
 
-        rotations_ba = np.concatenate(rotations_ba, axis=0)
-        translations_ba = np.concatenate(translations_ba, axis=0)
+        rotations_ba = torch.cat(rotations_ba, axis=0).to(self.device)
+        translations_ba = torch.cat(translations_ba, axis=0).to(self.device)
         eulers_ba = np.concatenate(eulers_ba, axis=0)
+        
+        return srcs, targets, rotations_ab, translations_ab, eulers_ab, rotations_ba, translations_ba, eulers_ba
 
-        return torch.from_numpy(srcs).cuda(),torch.from_numpy(targets).cuda(),torch.from_numpy(rotations_ab).cuda(),torch.from_numpy(translations_ab).cuda(),eulers_ab,torch.from_numpy(rotations_ba).cuda(),torch.from_numpy(translations_ba).cuda(),eulers_ba
+    def test_and_print(self, cloud_type, pre_defined_batch=None):
 
-    def test_print(self, output, xxx_file):
-
-        src, target, rotation_ab, translation_ab, euler_ab, rotation_ba, translation_ba, euler_ba = self.create_batch()
+        output, xxx_file = self.create_log_files(cloud_type)
+        if pre_defined_batch is None:
+            src, target, rotation_ab, translation_ab, euler_ab, rotation_ba, translation_ba, euler_ba = self.create_batch()
+        else:
+            assert len(pre_defined_batch) == 8, "A batch should be a predefined batch, containing [src, target, rotation_ab, translation_ab, euler_ab, rotation_ba, translation_ba, euler_ba]"
+            src, target, rotation_ab, translation_ab, euler_ab, rotation_ba, translation_ba, euler_ba = pre_defined_batch
         
 
         for i in range(rotation_ab.shape[0]):
@@ -294,6 +334,16 @@ class DCP_MODEL():
         rotation_ab_pred_acc = torch.eye(3).cuda().unsqueeze(0).repeat(src.shape[0], 1, 1).cuda()
         rotation_ba_pred_acc = torch.eye(3).cuda().unsqueeze(0).repeat(src.shape[0], 1, 1).cuda()
         src_acc = torch.clone(src)
+        
+        for i in range(src.shape[0]):
+            output_folder = os.path.join(self._cfg.TRANSFORM.output, str(i))
+            os.makedirs(
+                output_folder,
+                exist_ok=True,
+            )
+            self.write_pcd_to_obj(os.path.join(output_folder, "src.obj"), src[i].squeeze().detach().cpu().numpy().T, c=(1, 0, 0))
+            self.write_pcd_to_obj(os.path.join(output_folder, "target.obj"), target[i].squeeze().detach().cpu().numpy().T, c=(0, 1, 1))
+        
         
         for iteration in range(self._cfg.TRANSFORM.iterations):
             test_loss, test_cycle_loss, \
@@ -336,6 +386,8 @@ class DCP_MODEL():
                         % (iteration,"B->A",test_loss,str(test_cycle_loss) if self._cfg.TRANSFORM.cycle else None,
                             test_mse_ba, test_rmse_ba, test_mae_ba, test_r_mse_ba, test_r_rmse_ba,
                             test_r_mae_ba, test_t_mse_ba, test_t_rmse_ba, test_t_mae_ba))
+        output.close()
+        xxx_file.close()
 
     def test_one_iteration(self, src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, rotation_ab_pred_acc, translation_ab_pred_acc, rotation_ba_pred_acc, translation_ba_pred_acc, src_acc, iteration):
         total_loss = 0
