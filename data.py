@@ -10,7 +10,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
 from pathlib import Path
-from Configs.pr_config import CFG
+from Configs.pr_config import CFG, TASK
 
 
 # Part of the code is referred from: https://github.com/charlesq34/pointnet
@@ -67,7 +67,7 @@ def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.05):
 
 
 class ModelNet40(Dataset):
-    def __init__(self, num_points, partition='train', gaussian_noise=False, unseen=False, factor=4):
+    def __init__(self, num_points, partition=TASK.TRAIN, gaussian_noise=False, unseen=False, factor=4):
         self.data, self.label = load_data(partition)
         self.num_points = num_points
         self.partition = partition
@@ -77,10 +77,10 @@ class ModelNet40(Dataset):
         self.factor = factor
         if self.unseen:
             ######## simulate testing on first 20 categories while training on last 20 categories
-            if self.partition == 'test':
+            if self.partition == TASK.TEST:
                 self.data = self.data[self.label>=20]
                 self.label = self.label[self.label>=20]
-            elif self.partition == 'train':
+            elif self.partition == TASK.TRAIN:
                 self.data = self.data[self.label<20]
                 self.label = self.label[self.label<20]
 
@@ -88,7 +88,7 @@ class ModelNet40(Dataset):
         pointcloud = self.data[item][:self.num_points]
         if self.gaussian_noise:
             pointcloud = jitter_pointcloud(pointcloud)
-        if self.partition != 'train':
+        if self.partition != TASK.TRAIN:
             np.random.seed(item)
         anglex = np.random.uniform() * np.pi / self.factor
         angley = np.random.uniform() * np.pi / self.factor
