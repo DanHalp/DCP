@@ -411,7 +411,6 @@ class SVDHead(nn.Module):
                 r = torch.matmul(v, u.transpose(1, 0).contiguous())
                 # r = r * self.reflect
             R.append(r)
-
             U.append(u)
             S.append(s)
             V.append(v)
@@ -423,11 +422,86 @@ class SVDHead(nn.Module):
 
         t = torch.matmul(-R, src.mean(dim=2, keepdim=True)) + src_corr.mean(dim=2, keepdim=True)
         return R, t.view(batch_size, 3)
+    
+class ICP(nn.Module):
+    def __init__(self, args):
+        super(ICP, self).__init__()
+        self._cfg = args
+        
+    def procusets(self, S1 ,S2):
+        
+        transposed = False
+        if S1.shape[1] != 3 :
+            S1 = S1.permute(0,2,1)
+            S2 = S2.permute(0,2,1)
+            transposed = True
+        assert(S2.shape[1] == S1.shape[1])
 
+        # 1. Remove mean.
+        mu1 = S1.mean(axis=-1, keepdims=True)
+        mu2 = S2.mean(axis=-1, keepdims=True)
+
+        X1 = S1 - mu1
+        X2 = S2 - mu2
+
+        # 2. Compute variance of X1 used for scale.
+        var1 = torch.sum(X1**2, dim=1).sum(dim=1)
+
+        # 3. The outer product of X1 and X2.
+        K = X1.bmm(X2.permute(0,2,1))
+
+        # 4. Solution that Maximizes trace(R'K) is R=U*V', where U, V are
+        # singular vectors of K.
+        U, s, V = torch.svd(K)
+        # Construct Z that fixes the orientation of R to get det(R)=1.
+        Z = torch.eye(U.shape[1], device=S1.device).unsqueeze(0)
+        Z = Z.repeat(U.shape[0],1,1)
+        Z[:,-1, -1] *= torch.sign(torch.det(U.bmm(V.permute(0,2,1))))
+
+        # Construct R.
+        R = V.bmm(Z.bmm(U.permute(0,2,1)))
+
+    
+        # 5. Recover translation.
+        t = mu2 - ((R.bmm(mu1))) 
+
+        # 6. Error:
+        S1_hat =  R.bmm(S1) + t  
+
+        if transposed:
+            S1_hat = S1_hat.permute(0,2,1)
+
+        return S1_hat, R, t
+
+    def forward(self, *args):
+        
+        X1, X2 = args[0].transpose(2,1), args[1].transpose(2,1)
+        R_acc = torch.eye(X1.shape[2], device=X1.device).repeat(X1.shape[0], 1, 1)
+        t_acc = torch.zeros(1, 3, 1).to(X1.device)
+        t_score = np.inf
+        before = 0
+        for _ in range(self._cfg.TRANSFORM.icp_iter):
+            
+            cdist = torch.cdist(X1 - X1.mean(axis=1)[:, None, :],
+                                X2 - X2.mean(axis=1)[:, None, :])
+            mindists, argmins = torch.min(cdist, axis=2)
+            
+            t_score  = torch.mean(mindists)                
+            if abs(t_score - before) < 1e-4:
+                break
+            before = t_score
+            
+            temp = X2[np.arange(X2.shape[0]), argmins.T].permute((1, 0, 2))
+            X1, R, t = self.procusets(X1, temp)
+            R_acc = torch.matmul(R, R_acc)
+            t_acc = torch.matmul(R, t_acc) + t
+
+        return X1.transpose(2,1), R_acc, t_acc
 
 class DCP(nn.Module):
     def __init__(self, args):
         super(DCP, self).__init__()
+        self._cfg = args
         self.emb_dims = args.TRANSFORM.emb_dims
         self.cycle = args.TRANSFORM.cycle
         if args.TRANSFORM.emb_nn == 'pointnet':
@@ -450,6 +524,8 @@ class DCP(nn.Module):
             self.head = SVDHead(args=args)
         else:
             raise Exception('Not implemented')
+        
+        self.icp = ICP(args)
 
     def forward(self, *input):
         src = input[0]
@@ -461,7 +537,7 @@ class DCP(nn.Module):
 
         src_embedding = src_embedding + src_embedding_p
         tgt_embedding = tgt_embedding + tgt_embedding_p
-
+        
         rotation_ab, translation_ab = self.head(src_embedding, tgt_embedding, src, tgt)
         if self.cycle:
             rotation_ba, translation_ba = self.head(tgt_embedding, src_embedding, tgt, src)
