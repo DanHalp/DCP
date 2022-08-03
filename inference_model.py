@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from copy import deepcopy
 from datetime import datetime
 import os
 from telnetlib import X3PAD
@@ -21,7 +22,7 @@ from time import time
 from SpareNet.Inference_model import SpareNet
 from torch.utils.tensorboard import SummaryWriter
 import pandas as pd
-
+# from SpareNet.cuda.chamfer_dist import ChamferDistanceSeperate
 
 
 class DCP_MODEL():
@@ -39,31 +40,34 @@ class DCP_MODEL():
         self.partition = partiton
         self.device = args.PROJECT.device
         self._model, self._cfg  = self.make_model(args)
+        self.load_weights()
         
         if self._cfg.RECONSTRUCTION.active:
             self.init_reconstructor()
         
         if partiton==TASK.TEST:
             self._model.eval()
-            
             if  self._cfg.TRANSFORM.dataset == DATASETS.SHAPENET:
                 self.dataset = ShapeNetDataLoader(args).get_dataset(DatasetSubset.TEST)
                 if self._cfg.TRANSFORM.fixed_dataset_indices is not None:
                     indi = self._cfg.TRANSFORM.fixed_dataset_indices
                 else:
                     indi = np.random.permutation(np.arange(len(self.dataset)))[:self._cfg.TRANSFORM.test_batch_size]
+                    print("Indieces used for the random samling: ", list(indi))
                 self.dataset = [self.dataset[i] for i in indi]
-                
-            elif self._cfg.TRANSFORM.dataset == DATASETS.MODELENT:
+            
+            else:
+                # self._cfg.TRANSFORM.dataset == DATASETS.MODELENT:
                 self.dataset  = ModelNet40(num_points=self._cfg.TRANSFORM.num_points, partition='test', gaussian_noise=self._cfg.TRANSFORM.gaussian_noise,
                             unseen=self._cfg.TRANSFORM.unseen, factor=self._cfg.TRANSFORM.factor)
-            else:
-                raise Exception("An invalid dataset name was given. Check the relevant variable in pr_config.py")
+            # else:
+            #     raise Exception("An invalid dataset name was given. Check the relevant variable in pr_config.py")
              
         # We train on shapenet, since we already have a pretrained model for Modelnet.
         else:
             self._model.train()
-
+            if self._cfg.RECONSTRUCTION.active:
+                self.reconstructor.model.models.train()
             p = self._cfg.TRANSFORM.dataset_fraction
             self.train_dataset =  ShapeNetDataLoader(args).get_dataset(DatasetSubset.TRAIN)
             self.train_dataset.file_list = self.train_dataset.file_list[:int(len(self.train_dataset.file_list) * p)]
@@ -89,6 +93,7 @@ class DCP_MODEL():
             
             # Create an optimizr --> Note that you could feed it with as many optimizer as desired.
             opt1 = torch.optim.Adam(self._model.parameters(), lr=self._cfg.TRANSFORM.lr, weight_decay=self._cfg.TRANSFORM.reg)
+            # opt1 = torch.optim.Adam(self.reconstructor.model.models.parameters(), lr=self._cfg.TRANSFORM.lr, weight_decay=self._cfg.TRANSFORM.reg)
             self.optimizer = MultipleOptimizer(opt1)
             self._cfg.TRANSFORM.checkpoints_path = Path(f"Checkpoints/{self._cfg.TRANSFORM.dataset_name}") / datetime.now().strftime('run_%H_%M_%d_%m_%Y')
             os.makedirs(self._cfg.TRANSFORM.checkpoints_path, exist_ok=True)
@@ -98,7 +103,15 @@ class DCP_MODEL():
                     
     def init_reconstructor(self):
         self.reconstructor = SpareNet(self._cfg)
-    
+        
+    def load_weights(self):
+        if self._cfg.TRANSFORM.model_path != "":
+            self._model.load_state_dict(torch.load(self._cfg.TRANSFORM.model_path), strict=False)
+            print(f"Loaded the weights from {self._cfg.TRANSFORM.model_path}")
+        else:
+            print("No path to pretrained model was given to load")
+            
+        
     def make_model(self, args):
         
         assert "TRANSFORM" in args, "Wrong cfg, ya habibi"
@@ -106,11 +119,6 @@ class DCP_MODEL():
         args.PROJECT.update(args.RECONSTRUCTION) # Important for the dataloader, as it is initially a part of the reconstruction repo.
         args.CONST.num_workers = 2 # Suggested by pytorch
         model = DCP(args).to(self.device)
-        
-        # Load pretrained weights from ModelNet
-        if args.TRANSFORM.model_path != "":
-            model.load_state_dict(torch.load(args.TRANSFORM.model_path), strict=False)
-            print(f"Loaded the weights from {args.TRANSFORM.model_path}")
 
         return model, args
     
@@ -135,12 +143,15 @@ class DCP_MODEL():
             gt = gt.T
             assert pc.shape[0] == 3 and gt.shape[0] == 3, "Your point cloud should be of shape (3xPointNum)"
         
-        indi = np.random.permutation(pc.shape[1])[:self._cfg.TRANSFORM.num_points]
-        pointcloud1 = pc[:, indi]
-        indi = np.random.permutation(gt.shape[1])[:self._cfg.TRANSFORM.num_points]
-        pointcloud2 = gt[:, indi]
+        pointcloud1 = pc[:, :self._cfg.TRANSFORM.num_points]
+        pointcloud2 = gt[:, :self._cfg.TRANSFORM.num_points]
+        # indi = np.random.permutation(pc.shape[1])[:self._cfg.TRANSFORM.num_points]
+        # pointcloud1 = pc[:, indi]
+        # indi = np.random.permutation(gt.shape[1])[:self._cfg.TRANSFORM.num_points]
+        # pointcloud2 = gt[:, indi]
         
-        if self.gaussian_noise or CFG.PROJECT.task  == TASK.TRAIN:
+        
+        if self.gaussian_noise or (CFG.PROJECT.task  == TASK.TRAIN and self._model.training):
             pointcloud1 = self.jitter_pointcloud(pointcloud1)
         if self.partition != TASK.TRAIN:
             np.random.seed(np.random.randint(len(self.dataset)))
@@ -178,7 +189,6 @@ class DCP_MODEL():
 
         return pointcloud1, pointcloud2, R_ab, translation_ab, R_ba, translation_ba, euler_ab, euler_ba
             
-        
     def jitter_pointcloud(self, pointcloud, sigma=0.01, clip=0.05):
         """
         Add noise to learning, as a regularization technique.
@@ -204,15 +214,13 @@ class DCP_MODEL():
                 ind =  np.random.choice(np.arange(len(self.dataset)))
             gt = self.dataset[ind][-1][PC_TYPES_LIST[PC_TYPES.GT_CLOUD]].to(self.device).reshape(1, -1, 3)
             x = self.dataset[ind][-1][self._cfg.TRANSFORM.pc_type].to(self.device).reshape(1, -1, 3)
-            
             if self._cfg.RECONSTRUCTION.active:
                 assert self._cfg.TRANSFORM.pc_type in [PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD],PC_TYPES_LIST[PC_TYPES.GT_CLOUD]], \
                     f"Only partial clouds at gtcloud can be reconstructed, not {self._cfg.TRANSFORM.pc_type}"
-                
-                data = {PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]: x, PC_TYPES_LIST[PC_TYPES.GT_CLOUD]: gt}
-                _, _, refine_ptcloud, _ = self.reconstructor.complete(data)
-                x = refine_ptcloud
-                print(f"Reconstructed pc {ind}")
+                data = {PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]: x}
+                _, _, x, _ = self.reconstructor.complete(data)
+                # print(f"Reconstructed pc {ind}")
+            
         else:
             if ind < 0:
                 ind =  np.random.choice(np.arange(len(self.dataset.data)))
@@ -226,8 +234,7 @@ class DCP_MODEL():
         Inference of DCP for rotations.
         """
         return self._model(x.to(self.device), y.to(self.device))
-        
-
+    
     @property
     def model(self):
         return self._model
@@ -235,18 +242,28 @@ class DCP_MODEL():
     @property
     def cfg(self):
         return self._cfg
-
     
+    def read_transformations(self):
+        path = Path("/home/danha/PCD-Reconstruction-and-Registration/Outputs/ShapeNet/Orig/gtcloud/Metrics")
+        files = os.listdir(path)
+        file = [x for x in files if "transformation" in x][0]
+        df = pd.read_csv(path / file)
+        data = df.loc[df['type'] == "ground_truth"]
+        rotations =  np.array([np.matrix(str(x)).reshape(3,3) for x in data["rotation_ab"].values])
+        translations = np.array([np.matrix(str(x)).reshape(3,1) for x in data["translation_ab"].values])
+        return torch.from_numpy(rotations).to(self.device).float(), torch.from_numpy(translations).to(self.device).float()
+
     def create_log_files(self, cloud_type):
         
         """
         Create pandas' DataFrames, to save the metrics and original and predicted rotations to .csv viles.
         """
         
-        pc_path = Path(CFG.TRANSFORM.output) / CFG.TRANSFORM.dataset_name / cloud_type
+        model_type = "Orig" if self._cfg.TRANSFORM.model_path == MODELS_ORIG_OR_TRAIN[0] else "Trained"
+        pc_path = Path(CFG.TRANSFORM.output) / CFG.TRANSFORM.dataset_name / model_type /  cloud_type
         make_dir(pc_path)
         metrics_path = pc_path  / "Metrics"
-        make_dir(metrics_path)
+        make_dir(metrics_path, delete=True)
         self._cfg.TRANSFORM.current_out_dir = pc_path
         self._cfg.TRANSFORM.metrics_path = metrics_path
         pd.set_option('display.float_format', '{:,.3E}'.format)
@@ -264,26 +281,58 @@ class DCP_MODEL():
         # Estimate the initial rotation on the ground_truth.
         self._cfg.RECONSTRUCTION.active = False
         self._cfg.TRANSFORM.pc_type = PC_TYPES_LIST[PC_TYPES.GT_CLOUD]
-        batch = list(self.create_batch())
-        loss = self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
-        print(f"Evaluated the transformation for the ground truths, with loss: {loss}")
+        full_b, partial_b, recon_b = [], [], []
+        for i in range(2):
+            self._cfg.TRANSFORM.model_path = MODELS_ORIG_OR_TRAIN[i]
+            self.load_weights()
+            print(f"######################################### Evaluationg for {self._cfg.TRANSFORM.model_path} #########################################")
+            self.create_log_files(self._cfg.TRANSFORM.pc_type)
+            
+            if i == 0:
+                batch = list(self.create_batch())
+                full_b = deepcopy(batch)
+            else:
+                batch = full_b
+                
+            print(batch[2][0])
+            loss = self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
+            print(f"Evaluated the transformation for the ground truths, with loss: ", ['{:.2e}'.format(l) for l in loss])
+            print("######################################################################")
 
-        # Calculate the partial point cloud.
-        self._cfg.TRANSFORM.pc_type = PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]
-        src, _, _, _, _, _, _, _ = self.create_batch(rotation_is_known=True)
-        batch[0] = src
-        loss =self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
-        print(f"Evaluated the transformation for the partial clouds, with loss {loss}")
-        
-        # Evaluate reconstrucion.
-        self._cfg.RECONSTRUCTION.active = True
-        self.init_reconstructor()
-        src, _, _, _, _, _, _, _ = self.create_batch(rotation_is_known=True)
-        batch[0] = src
-        loss = self.test_and_print(PC_TYPES_LIST[PC_TYPES.RECONSTRUCTED_CLOUD], pre_defined_batch=batch)
-        print(f"Evaluated the transformation for the reconstructed clouds, with loss {loss}")
-        
-    def create_batch(self, rotation_is_known=False):
+            if self._cfg.TRANSFORM.dataset == DATASETS.SHAPENET:
+                # Calculate the partial point cloud.
+                self._cfg.TRANSFORM.pc_type = PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]
+                self.create_log_files(self._cfg.TRANSFORM.pc_type)
+                if i == 0:
+                    src, _, _, _, _, _, _, _= self.create_batch()
+                    batch[0] = src
+                    partial_b = deepcopy(batch)
+                else:
+                    batch = partial_b
+                
+                loss = self.test_and_print(self._cfg.TRANSFORM.pc_type, pre_defined_batch=batch)
+                print("Evaluated the transformation for the partial clouds, with loss: ", ['{:.2e}'.format(l) for l in loss])
+                print("######################################################################")
+                
+                # Evaluate reconstrucion.
+                self._cfg.RECONSTRUCTION.active = True
+                self.init_reconstructor()
+                self.create_log_files(PC_TYPES_LIST[PC_TYPES.RECONSTRUCTED_CLOUD])
+                src, _, _, _, _, _, _, _= self.create_batch()
+                batch[0] = src
+                if i == 0:
+                    src, _, _, _, _, _, _, _= self.create_batch()
+                    batch[0] = src
+                    recon_b = deepcopy(batch)
+                else:
+                    batch = recon_b
+
+                loss = self.test_and_print(PC_TYPES_LIST[PC_TYPES.RECONSTRUCTED_CLOUD], pre_defined_batch=batch)
+                print(f"Evaluated the transformation for the reconstructed clouds, with loss: ", ['{:.2e}'.format(l) for l in loss])
+                self._cfg.RECONSTRUCTION.active = False
+                print("######################################################################")
+
+    def create_batch(self):
         """
         Given the test_batch_size in the configurations, this function is responsible to:
             1. sample a point cloud from the dataset
@@ -297,25 +346,26 @@ class DCP_MODEL():
         else:
             size = min(len(self.dataset), self._cfg.TRANSFORM.test_batch_size)
         rotations_ab = []; translations_ab = []; rotations_ba = []; translations_ba = []; eulers_ab = []; eulers_ba = []; srcs = [];  targets = []
-            
+        
         for i in range(size):
-           
             pc, gt = self.sample_pc(i)
             pc = pc.transpose(2,1)
             gt = gt.transpose(2,1)
+            
+            
             src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba = self.create_random_trans(pc.cpu(), gt.cpu())
-            
-            if rotation_is_known:
-                srcs.append(src)
-                continue
-            
             rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba = torch.unsqueeze(rotation_ab, dim=0), torch.unsqueeze(translation_ab, dim=0), \
-                                                                                                    torch.unsqueeze(rotation_ba, dim=0), torch.unsqueeze(translation_ba, dim=0), \
-                                                                                                    torch.unsqueeze(euler_ab, dim=0), torch.unsqueeze(euler_ba, dim=0)
+                                                                                                torch.unsqueeze(rotation_ba, dim=0), torch.unsqueeze(translation_ba, dim=0), \
+                                                                                                torch.unsqueeze(euler_ab, dim=0), torch.unsqueeze(euler_ba, dim=0)
+            gt = rotation_ab.bmm(gt)+ translation_ab.T                                                                                    
+            output_folder = os.path.join(self._cfg.TRANSFORM.current_out_dir, str(i))
+            make_dir(output_folder)
+            write_pcd_to_obj(os.path.join(output_folder, "src.obj"), pc.squeeze().detach().cpu().numpy().T, c=(1, 0, 0))
+            write_pcd_to_obj(os.path.join(output_folder, "gt.obj"), gt.squeeze().detach().cpu().numpy().T, c=(0, 1, 1))
             
+                                      
             srcs.append(src)
             targets.append(target)
-            
             ## save rotation and translation
             rotations_ab.append(rotation_ab)
             translations_ab.append(translation_ab)
@@ -323,10 +373,6 @@ class DCP_MODEL():
             rotations_ba.append(rotation_ba)
             translations_ba.append(translation_ba)
             eulers_ba.append(euler_ba.detach().cpu().numpy())
-        
-        if rotation_is_known:
-            srcs = torch.cat(srcs, axis=0)
-            return srcs, targets, rotations_ab, translations_ab, eulers_ab, rotations_ba, translations_ba, eulers_ba
         
         srcs = torch.cat(srcs, axis=0).to(self.device)
         targets = torch.cat(targets, axis=0).to(self.device)
@@ -338,6 +384,7 @@ class DCP_MODEL():
         rotations_ba = torch.cat(rotations_ba, axis=0).to(self.device)
         translations_ba = torch.cat(translations_ba, axis=0).to(self.device)
         eulers_ba = np.concatenate(eulers_ba, axis=0)
+        
         
         return srcs, targets, rotations_ab, translations_ab, eulers_ab, rotations_ba, translations_ba, eulers_ba
 
@@ -361,11 +408,6 @@ class DCP_MODEL():
             self.transorm_data_df.loc[-1] = [i,"ground_truth",str(rotation_ab[i].tolist()), str(translation_ab[i].tolist()), str(rotation_ba[i].tolist()), str(translation_ba[i].tolist())]
             self.transorm_data_df.index += 1
         
-        for i in range(src.shape[0]):
-            output_folder = os.path.join(self._cfg.TRANSFORM.current_out_dir, str(i))
-            make_dir(output_folder)
-            write_pcd_to_obj(os.path.join(output_folder, "src.obj"), src[i].squeeze().detach().cpu().numpy().T, c=(1, 0, 0))
-            write_pcd_to_obj(os.path.join(output_folder, "target.obj"), target[i].squeeze().detach().cpu().numpy().T, c=(0, 1, 1))
         
         # Apply dcp / dcp + icp / icp.
         translation_ab_pred_acc, translation_ba_pred_acc = torch.zeros(translation_ab.shape, dtype=torch.float32).cuda(), torch.zeros(translation_ba.shape, dtype=torch.float32).cuda()
@@ -431,6 +473,7 @@ class DCP_MODEL():
         Infer a single transformation on a given batch.
         The original version uses the DCP algorithm only, while one could on top of that apply the "ICP" algorithm, for much more accurate results.
         """
+        
         total_cycle_loss = 0
         batch_size = src.shape[0]
         
@@ -438,14 +481,13 @@ class DCP_MODEL():
         start = time()
         rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred = self.estimate_rotation(src_acc, target)
         dcp_runtime = time() - start
+        print("DCP_runtime", dcp_runtime)
         
         # If a few iterations are made, the rotations and transormations need to be accumelated.
         rotation_ab_pred_acc = torch.matmul(rotation_ab_pred_acc, rotation_ab_pred)
         translation_ab_pred_acc = torch.matmul(rotation_ab_pred, translation_ab_pred_acc[:, :, None]).squeeze() +  translation_ab_pred
         rotation_ba_pred_acc = torch.matmul(rotation_ba_pred_acc, rotation_ba_pred)
         translation_ba_pred_acc = torch.matmul(rotation_ba_pred, translation_ba_pred_acc[:, :, None]).squeeze() +  translation_ba_pred
-
-        
         transformed_src = transform_point_cloud(src_acc, rotation_ab_pred, translation_ab_pred)
         transformed_target = transform_point_cloud(target, rotation_ba_pred_acc, translation_ba_pred_acc)
         
@@ -455,10 +497,12 @@ class DCP_MODEL():
             # DCP + ICP
             identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
             start = time()
-            
             # Take the already approximated pc from the DCP, and infer ICP on top of that.
             transformed_src_icp, R_dcp_icp, t_dcp_icp = self._model.icp(transformed_src, target)
-            dcp_icp_runtime = time()  - start + dcp_runtime
+            icp_runtime = time()  - start
+            dcp_icp_runtime = icp_runtime + dcp_runtime
+            print("ICP_runtime", icp_runtime)
+            print("DCP_ICP_runtime", dcp_icp_runtime)
             
             R = torch.matmul(R_dcp_icp, rotation_ab_pred_acc)
             t = (torch.matmul(R_dcp_icp, translation_ab_pred_acc[:, :, None]).squeeze() + t_dcp_icp.squeeze()).reshape(-1, 3)
@@ -467,13 +511,15 @@ class DCP_MODEL():
             dcp_R_loss = (F.mse_loss(torch.matmul(rotation_ab_pred_acc.transpose(2, 1), rotation_ab), identity) / batch_size).item()
             dcp_icp_t_loss = (F.mse_loss(t, translation_ab) / batch_size).item()
             dcp_t_loss = (F.mse_loss(translation_ab_pred_acc, translation_ab) / batch_size).item()
+            print("dcp_icp_loss", '{:.2e}'.format(dcp_icp_R_loss))            
+            
             
             # Just ICP
-            start = time()
-            src_icp, R_icp, t_icp = self._model.icp(src_acc, target)
+            src_icp, R_icp, t_icp = self._model.icp(src, target)
             icp_runtime = time() - start
             icp_R_loss = (F.mse_loss(torch.matmul(R_icp.transpose(2, 1), rotation_ab), identity)  / batch_size).item()
             icp_t_loss = (F.mse_loss(t_icp.reshape(translation_ab.shape), translation_ab) / batch_size).item()
+            print("icp_loss", '{:.2e}'.format(icp_R_loss))
             icp_loss_array = [dcp_runtime, dcp_icp_runtime, icp_runtime, dcp_icp_R_loss, dcp_R_loss, dcp_icp_t_loss, dcp_t_loss, icp_R_loss, icp_t_loss]
 
         # Save Transformeds
@@ -516,7 +562,6 @@ class DCP_MODEL():
             rotation_ba_pred_acc, translation_ba_pred_acc, \
             transformed_src, icp_loss_array
     
-    
     ########################### Training ###########################
     
     def train(self):
@@ -530,8 +575,7 @@ class DCP_MODEL():
         self.best_test_loss = np.inf
         for epoch in range(self._cfg.TRANSFORM.epochs):        
             self.one_train_epoch(epoch)  # Validation occours evey n iterations.
-            
-                
+             
     def one_train_epoch(self, epoch, mode="train", val_loss=0):
         self._model.train()
         with tqdm(self.train_data_loader, desc=mode, leave = False, ncols=150) as tepoch:
@@ -554,7 +598,6 @@ class DCP_MODEL():
                 
         self.tblog.add_scalar(f"Loss/Average_{mode}_loss", scalar_value=total_loss / (iteration + 1), global_step=self.train_iter, new_style=True)    
          
-    
     def one_val_epoch(self, epoch):
         self._model.eval()
         with tqdm(self.test_data_loader, desc="Val", leave = False, ncols=150) as vepoch:
@@ -588,13 +631,13 @@ class DCP_MODEL():
             self._model.train()
             return total_loss
     
-    
     def general_step(self, batch,  iteration, mode):
-        x = batch[-1][PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]]
-        gt = batch[-1][PC_TYPES_LIST[PC_TYPES.GT_CLOUD]]
         
-        if np.random.rand() < self._cfg.TRANSFORM.full_shape_p:
-            x = gt
+        x = batch[-1][PC_TYPES_LIST[PC_TYPES.PARTIAL_CLOUD]]
+        
+        gt = batch[-1][PC_TYPES_LIST[PC_TYPES.GT_CLOUD]]
+        # if np.random.rand() < self._cfg.TRANSFORM.full_shape_p:
+        #    x = gt 
         
         batch_size = x.shape[0]
         sources, targets, rotations_ab, translations_ab = [], [], [], []
@@ -605,23 +648,21 @@ class DCP_MODEL():
             rotation_ab, translation_ab = rotation_ab.reshape(-1, *rotation_ab.shape), translation_ab.reshape(-1, *translation_ab.shape)
             sources.append(src);targets.append(target);rotations_ab.append(rotation_ab);translations_ab.append(translation_ab)
         src, target, rotation_ab, translation_ab = torch.cat(sources, axis=0), torch.cat(targets, axis=0), torch.cat(rotations_ab, axis=0), torch.cat(translations_ab, axis=0)
-
-        # Predict rotations on a batch.
-        rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred= self._model(src, target)
+        
+        rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred = self._model(src, target)
         
         # Evaluate.
         identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
         loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
-            + F.mse_loss(translation_ab_pred, translation_ab)
+            + F.mse_loss(translation_ab_pred, translation_ab) #+ ChamferDistanceSeperate(torch.matmul(rotation_ab_pred, src) + translation_ab_pred, target)
+
             
         if self._cfg.TRANSFORM.cycle:
             rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
             translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
                                                         translation_ab_pred.view(batch_size, 3, 1)).view(batch_size, 3)
-                                        + translation_ba_pred) ** 2, dim=[0, 1])
+                                        + translation_ba_pred) ** 2, dim=[0, 1]) 
             cycle_loss = rotation_loss + translation_loss
-
             loss = loss + cycle_loss * 0.1
-
         self.tblog.add_scalar(f"Loss/{mode}",scalar_value=loss,  global_step=iteration, new_style=True)
         return loss

@@ -14,6 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 # from .util import quat2mat
+# from chamferdist import ChamferDistance
+# from chamfer_distance import ChamferDistance as ChamferDistance2
 
 
 # Part of the code is referred from: http://nlp.seas.harvard.edu/2018/04/03/attention.html#positional-encoding
@@ -444,9 +446,6 @@ class ICP(nn.Module):
         X1 = S1 - mu1
         X2 = S2 - mu2
 
-        # 2. Compute variance of X1 used for scale.
-        var1 = torch.sum(X1**2, dim=1).sum(dim=1)
-
         # 3. The outer product of X1 and X2.
         K = X1.bmm(X2.permute(0,2,1))
 
@@ -461,7 +460,6 @@ class ICP(nn.Module):
         # Construct R.
         R = V.bmm(Z.bmm(U.permute(0,2,1)))
 
-    
         # 5. Recover translation.
         t = mu2 - ((R.bmm(mu1))) 
 
@@ -481,18 +479,18 @@ class ICP(nn.Module):
         t_score = np.inf
         before = 0
         for _ in range(self._cfg.TRANSFORM.icp_iter):
-            
+
             cdist = torch.cdist(X1 - X1.mean(axis=1)[:, None, :],
                                 X2 - X2.mean(axis=1)[:, None, :])
             mindists, argmins = torch.min(cdist, axis=2)
-            
-            t_score  = torch.mean(mindists)                
-            if abs(t_score - before) < 1e-4:
+        
+            t_score  = torch.mean(mindists)
+            if abs(t_score - before) < 1e-8:
                 break
             before = t_score
-            
-            temp = X2[np.arange(X2.shape[0]), argmins.T].permute((1, 0, 2))
-            X1, R, t = self.procusets(X1, temp)
+ 
+            temp2 = X2[np.arange(X2.shape[0]), argmins.T].permute((1, 0, 2))
+            X1, R, t = self.procusets(X1, temp2)
             R_acc = torch.matmul(R, R_acc)
             t_acc = torch.matmul(R, t_acc) + t
 
